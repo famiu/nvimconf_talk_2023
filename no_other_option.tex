@@ -1,0 +1,431 @@
+%! TeX program = lualatex
+\documentclass[10pt]{beamer}
+\title{No other \lq{}option\rq{}}
+\subtitle{Neovim option internals}
+\author{Famiu Haque}
+\date{Neovim Conf 2023}
+\usepackage[T1]{fontenc}
+\usepackage{fontspec}
+\usepackage{parskip}
+\usepackage{graphicx}
+\usepackage{mathtools}
+\usepackage{listings}
+\usepackage{fontawesome5}
+\usepackage{microtype}
+\usetheme[numbering=fraction]{metropolis}
+\usecolortheme{owl}
+
+\definecolor{titlefg}{RGB}{114, 169, 207}
+\definecolor{listingsbg}{RGB}{10, 10, 30}
+
+\setmainfont{Fira Sans}[ Scale = 0.7, UprightFont = Fira Sans Light, BoldFont = Fira Sans Medium,
+ItalicFont = Fira Sans Light Italic, BoldItalicFont = Fira Sans Medium Italic ]
+\setsansfont{Fira Sans}[ Scale = 0.7, UprightFont = Fira Sans Light, BoldFont = Fira Sans Medium,
+ItalicFont = Fira Sans Light Italic, BoldItalicFont = Fira Sans Medium Italic ]
+\setmonofont{Fira Code}[ Scale = 0.6 ]
+\setmathsf{Fira Math}[ Scale = 0.7 ]
+\setbeamertemplate{frametitle}[default][center]
+\setbeamertemplate{frame footer}{\insertshortauthor\hfill\insertshorttitle: \insertshortsubtitle}
+\setbeamercolor{frametitle}{bg=,fg=titlefg}
+\setbeamercolor{framesubtitle}{bg=,fg=white}
+\setbeamerfont{frametitle}{size=\LARGE}
+\setbeamerfont{framesubtitle}{size=\Large,series=\mdseries}
+% Define
+\lstdefinelanguage{vim}
+{%
+    morekeywords={
+        set,
+        setlocal,
+        setglobal,
+        let,
+        map,
+        nmap,
+        filetype,
+        on,
+        off,
+        autocmd,
+        Plugin,
+        call
+    },
+    morecomment=[l]{"}, % l is for line comment
+    morestring=[b]' % defines that strings are enclosed in double quotes
+}
+% Default code style
+\lstdefinestyle{code_default_style}{
+    backgroundcolor    = \color{listingsbg},
+    commentstyle       = \ttfamily\color{lightgray},
+    keywordstyle       = \ttfamily\color{red},
+    numberstyle        = \ttfamily\color{blue},
+    stringstyle        = \ttfamily\color{green},
+    basicstyle         = \ttfamily,
+    frame = single,
+    framesep = 5pt,
+    xleftmargin = 5pt,
+    xrightmargin = 5pt,
+    aboveskip          = 10pt,
+    belowskip          = 5pt,
+    tabsize            = 4,
+    showstringspaces   = false,
+    upquote            = true,
+    breakatwhitespace  = false,
+    breaklines         = true,
+    captionpos         = b,
+    keepspaces         = true,
+    showspaces         = false,
+    showstringspaces   = false,
+    showtabs           = false,
+}
+\lstdefinestyle{vim_style}{
+    language           = vim,
+    style              = code_default_style,
+}
+\lstdefinestyle{lua_style}{
+    language           = {[5.1]Lua},
+    style              = code_default_style,
+}
+\lstdefinestyle{c_style}{
+    language           = C,
+    style              = code_default_style,
+}
+\lstset{style=vim_style}
+
+\begin{document}
+\begin{frame}
+\titlepage
+\end{frame}
+\begin{frame}
+\frametitle{About Me}
+\begin{itemize}
+    \item Neovim contributor since 2021.
+    \item Author of global statusline, winbar, user inccommand, `nvim\_cmd`, among other things.
+    \item Currently working full-time to refactor Neovim options.
+    \item Still a high-school student.
+    \item Social media:
+\end{itemize}
+\vspace{0.5em}
+\hspace{3em}
+\begin{tabular}{l@{\hspace{0.5em}}l@{\hspace{8\tabcolsep}}l@{\hspace{0.5em}}l}
+    \faIcon{github} & github.com/famiu & \faIcon{twitch} & twitch.tv/fam1u \\
+    \faIcon{youtube} & youtube.com/@fam1u & \faIcon{twitter} & twitter.com/famiuhaque \\
+\end{tabular}
+\end{frame}
+\begin{frame}
+\frametitle{Things I plan to discuss}
+\begin{center}
+\begin{minipage}{2.675in}
+\begin{itemize}
+    \item What Neovim options are.
+    \item Limitations of Neovim options.
+    \item How Neovim options work internally.
+    \item What stands in the way of fixing these limitations.
+    \item How we plan to overcome those limitations.
+    \item What you can expect going forward.
+\end{itemize}
+\end{minipage}
+\end{center}
+\end{frame}
+\begin{frame}[fragile]
+\frametitle{What are Neovim options?}
+\begin{itemize}
+    \item Values that allow interfacing with internal Neovim variables.
+    \item Used to customize the behavior of Neovim or achieve desired special effects, For example:
+\begin{lstlisting}
+set number relativenumber  " Turn on hybrid line numbers
+set nohlsearch             " Disable search highlighting
+\end{lstlisting}
+    \item As of now, options can be either numbers, booleans or strings (foreshadowing).
+\begin{lstlisting}
+set wrap             " Boolean option
+set scrolloff=10     " Number option
+set winbar=%f\ [%M]  " String option
+\end{lstlisting}
+\pause
+    \item They are a nightmare to deal with.
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Limitations of Neovim options}
+\begin{itemize}
+    \item Only support numbers, booleans or strings.
+    \item More complicated data structures need to be represented as strings.
+    \item Callback options can't be set to Lua functions.
+    \item No clear way to indicate an unset local value for a global-local option.
+    \item Multiple interfaces for setting options, e.g., \lstinline{vim.o}, \lstinline{vim.opt}.
+    \item Behavior is unintuitive and confusing, especially for window-local and global-local
+    options.
+\end{itemize}
+\end{frame}
+\begin{frame}[fragile]
+\frametitle{Limitations of Neovim options}
+\framesubtitle{Nontrivial types are simulated using strings}
+\begin{itemize}
+    \item Dict-like string options.
+\begin{lstlisting}
+set fillchars=fold:\ ,diff:\ 
+\end{lstlisting}
+    \item List-like string options:
+\begin{lstlisting}
+set wildmode=longest,list,full 
+\end{lstlisting}
+    \item Function-like string options:
+\begin{lstlisting}
+set completefunc=v:lua.vim.lsp.omnifunc
+\end{lstlisting}
+\end{itemize}
+\end{frame}
+\begin{frame}[fragile]
+\frametitle{Limitations of Neovim options}
+\framesubtitle{Appending/prepending/removing from List-like/Dict-like options}
+\begin{itemize}
+    \item Vim script:
+\begin{lstlisting}
+set fillchars=fold:\ ,diff:\  " Works as you'd expect
+set fillchars+=fold:x         " Fillchars is now 'fold: ,diff: ,fold:x'
+set fillchars-=fold           " Does nothing, you also need the value
+\end{lstlisting}
+        \item Lua:
+        \begin{itemize}
+            \item Not possible through \lstinline{vim.o}.
+            \item \lstinline{vim.opt} allows appending, prepending and removing, but has the same
+                limitations as Vim script.
+        \end{itemize}
+\end{itemize}
+\end{frame}
+\begin{frame}[fragile]
+\frametitle{Limitations of Neovim options}
+\framesubtitle{Function-like options can't be set to Lua options}
+Well, they can.... but only through \lstinline{v:lua}, which only allows global functions or
+functions that are returned by some module.
+\begin{lstlisting}[style=lua_style]
+local function MyFunc(...)
+    -- ...
+end
+function _G.MyOtherFunc(...)
+    -- ...
+end
+
+vim.opt.completefunc = MyFunc             -- Not possible
+vim.opt.completefunc = v:lua.MyOtherFunc  -- Works
+\end{lstlisting}
+\end{frame}
+\begin{frame}[fragile]
+\frametitle{Limitations of Neovim options}
+\framesubtitle{No way to indicate unset local value for global-local options}
+\begin{itemize}
+    \item Many global-local options use arbitrary values to represent an unset local value.
+    \begin{itemize}
+        \item \lstinline{'undolevels'}: \lstinline{-123456}
+        \item \lstinline{'autoread'}: \lstinline{-1}
+    \end{itemize}
+    \item Wait, isn't \lstinline{'autoread'} a boolean option?
+    \begin{itemize}
+        \item Vim boolean options are actually tri-states.
+        \item Only global-local options need the third state (which is \lstinline{-1}).
+        \item Autoread is the only global-local options.
+    \end{itemize}
+    \item There is no way to unset \lstinline{'winbar'} for a single window.
+    \begin{itemize}
+        \item String options use empty string to indicate unset value.
+        \item But an empty string can mean no winbar or an empty winbar.
+    \end{itemize}
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Limitations of Neovim options}
+\framesubtitle{Multiple interfaces for getting/setting an option}
+\begin{itemize}
+    \item Vim script:
+    \begin{itemize}
+        \item \lstinline{set}, \lstinline{setlocal}, \lstinline{setglobal}
+        \item \lstinline{let}: \lstinline{&opt = val}, \lstinline{&b:opt = val},
+        \lstinline{&g:opt = val}
+        \item Vim script functions: \lstinline{getbufvar()}, \lstinline{getwinvar()},
+        \lstinline{setbufvar()}, \lstinline{setwinvar()}
+        \item API functions: \lstinline{nvim_get_option_value()},
+        \lstinline{nvim_set_option_value()}
+        \begin{itemize}
+            \item Deprecated API functions: \lstinline{nvim_get_option()},
+            \lstinline{nvim_set_option()}
+        \end{itemize}
+    \end{itemize}
+    \item Lua:
+    \begin{itemize}
+        \item \lstinline{vim.o}, \lstinline{vim.bo}, \lstinline{vim.wo}, \lstinline{vim.go}
+        \item \lstinline{vim.opt}, \lstinline{vim.opt_local}, \lstinline{vim.opt_global}
+        \item API functions: same as Vim script.
+    \end{itemize}
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Limitations of Neovim options}
+\framesubtitle{How did all of this happen?}
+\centering{I don't know for sure, but it probably went like this:}
+\begin{center}
+\includegraphics[keepaspectratio=true, width=3in]{images/xkcd_competing_standards.png}
+\end{center}
+\end{frame}
+\begin{frame}
+\frametitle{Limitations of Neovim options}
+\framesubtitle{Option scopes: No scope for simplicity}
+\begin{itemize}
+    \item Options can be divided into 4 types depending on scope.
+    \begin{itemize}
+        \item Global: Value is global. There is no catch. This is the only scope that makes any sense.
+        \item Window-local: Value is local to window... except when it isn't.
+        \item Buffer-local: Value is local to buffer (... or is it?).
+        \item Global-local: These options have both local and global values.
+    \end{itemize}
+    \item This would all be fine, except 3 out of 4 of these scopes have a catch.
+    \begin{itemize}
+        \item Window-local options actually have two values, one for all buffers and one for the
+            curent buffer.
+        \item Buffer-local options have global values too.
+        \item When you set the global value for a global-local option, it also sets the local value.
+    \end{itemize}
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Why is this important?}
+\begin{itemize} 
+    \item Options are the core component for configuring Neovim.
+    \item Basically all Neovim configs have to deal with Neovim options.
+    \item Every Neovim feature is connected to options in some way.
+    \item Improving the behavior of options will also make it easier to add features which require
+        more sophisticated configuration.
+\end{itemize}
+\end{frame}
+
+\lstset{style=c_style}
+
+\begin{frame}[fragile]
+\frametitle{How Neovim options work internally}
+\framesubtitle{More specifically, how they used to work before the refactor}
+\pause
+\begin{itemize}
+    \item They don't.\pause
+    \item Each option type is stored internally using a C variable type.
+    \begin{itemize}
+        \item Boolean options use \lstinline{int}.
+        \item Number options use \lstinline{long}.
+        \item String options use C-strings (\lstinline{const char *}).
+    \end{itemize}
+    \item Separate function for setting each option type: \lstinline{set_bool_option()},
+    \lstinline{set_num_option()}, \lstinline{set_string_option()}
+\end{itemize}
+\end{frame}
+\begin{frame}[fragile]
+\frametitle{How Neovim options work internally}
+\framesubtitle{More specifically, how they used to work before the refactor}
+\begin{itemize}
+    \item Separate code paths for each option interface.
+    \begin{itemize}
+        \item \lstinline[style=vim_style]{set} uses \lstinline{do_set_option_value()}.
+        \item \lstinline[style=vim_style]{let} uses \lstinline{ex_let_option()}.
+        \item API functions use \lstinline{set_option_value()}.
+    \end{itemize}
+    \item List-like, Dict-like and Function-like options are taken as strings and then manually
+        processed and stored in a struct corresponding to the option.
+\end{itemize}
+\end{frame}
+\begin{frame}[fragile]
+\frametitle{Why is this so hard to fix?}
+\framesubtitle{One reason: Neovim options code is a mess}
+\begin{itemize}
+    \item Lots of code duplication around many places (remember the separate option interfaces
+        mentioned earlier?).
+    \item No unified way of representing an option value.
+    \item Messy, borderline unreadable code. Take a guess what this line does:
+\begin{lstlisting}
+*opt_idx = (((*opt)->fullname[0] == 'v')
+        ? (shada_idx == -1 ? ((shada_idx = findoption("shada"))) : shada_idx)
+        : *opt_idx);
+\end{lstlisting}
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{So.. what are we going to do about it?}
+Right now, the plan is to aggressively refactor the Neovim codebase in order to:
+\begin{itemize}
+    \item Make the code more readable.
+    \item Make options more maintainable and extensible.
+    \item Reduce code duplication.
+    \item Get rid of multiple interfaces for doing similar things.
+    \item Remove arbitrary behavior of options (while keeping breaking changes minimal).
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{What have we done so far?}
+\begin{itemize}
+    \item Introduced the \lstinline{OptVal} type into the codebase to represent of option value of
+    any type.
+    \item Unified the option set function for all option types.
+    \item Unified (almost) all of the different codepaths for getting and setting an option.
+    \item Many other miscellaneous improvements.\\For more info, see:
+        https://github.com/neovim/neovim/issues/25672.
+\end{itemize}
+All of this was not done just by me. Special thanks to Lewis as well for doing a lot of the work on
+refactoring options. Also thanks to Bfredl, Zeertzjq and Justin for taking their time to review PRs.
+\end{frame}
+\begin{frame}
+\frametitle{What we're planning to do}
+\framesubtitle{And what you can expect in the future}
+\begin{itemize}
+    \item Unify the remaining duplicate interfaces for setting options.
+    \item Remove code specific to string options, to make sure that there is symmetry between all
+        option types.
+    \item Allow options to have multiple types.
+    \item Add a unique option type that indicates an unset local value for global-local options.
+    \item Add Dictionary, List and Function option types, instead of emulating those types using
+        Strings.
+    \item Make boolean options actually boolean.
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{What we're planning to do}
+\framesubtitle{And what you can expect in the future}
+\begin{itemize}
+    \item Changes specific to certain options:
+    \begin{itemize}
+        \item Allow unsetting \lstinline{'winbar'}.
+        \item Add a dict-based configuration format for complicated options such as
+            \lstinline{'winbar'}, \lstinline{'tabline'}, \lstinline{'statusline'}, etc.
+    \end{itemize} 
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Summary}
+\begin{itemize}
+    \item Neovim options have a bunch of limitations, most of them related to them being restricted
+        to 3 option types.
+    \item Those limitations cannot yet be fixed because the Neovim options codebase is currently
+        extremely difficult to maintain and extend.
+    \item There has been ongoing progress to aggressively refactor Neovim options, which should
+        allow us to eventually overcome these limitations.
+    \item In the future, we expect to have:
+    \begin{itemize}
+       \item More option types
+       \item Fewer interfaces
+       \item More intuitive behavior
+    \end{itemize}
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{One last thing}
+Reading Neovim options code is traumatizing.\\
+Go to one of these places and donate if you want to sponsor my therapy:
+\begin{itemize}
+    \item https://github.com/sponsors/neovim
+    \item https://opencollective.com/neovim
+\end{itemize}
+\end{frame}
+\begin{frame}
+\frametitle{Thank you!}
+\begin{itemize}
+    \item Thanks to the Neovim core team and other Neovim contributors for being so helpful and
+        welcoming to me.
+    \item Thanks to everyone who donated to Neovim and made it possible to work full-time on a
+        project I love.
+    \item And lastly, thank you, for spending your time listening to my talk.
+\end{itemize}
+\end{frame}
+\end{document}
